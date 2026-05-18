@@ -12,6 +12,12 @@ services:
     build: .
     environment:
       DB_HOST: db
+      DB_USER: admin
+      DB_PASS: admin
+      DB_NAME: crypto_data
+      DLQ_DIR: /app/data/dlq
       PYTHONUNBUFFERED: 1
+    volumes:
+      - ./data/dlq:/app/data/dlq
     depends_on:
       - db
