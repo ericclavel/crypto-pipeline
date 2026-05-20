@@ -7,7 +7,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the ingestion application logic
-COPY ingress_coingecko.py .
+COPY . .
 
 # Define execution entrypoint
-CMD ["python", "ingress_coingecko.py"]
+CMD ["python", "ingest_data.py"]
