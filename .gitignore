@@ -1,1 +1,6 @@
 .env
+
+# dbt environments and localized pipeline secrets
+transform/dbt_env/
+transform/crypto_transformer/logs/
+transform/crypto_transformer/target/
