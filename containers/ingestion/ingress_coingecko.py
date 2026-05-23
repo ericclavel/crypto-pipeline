@@ -1,23 +1,48 @@
 import os
 import sys
-import time
 import json
+import logging
 import requests
 from datetime import datetime
+from requests.exceptions import ConnectionError, Timeout, HTTPError
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+# Configure logging to track retry behavior cleanly
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
 
 # Configuration
 COINGECKO_BASE_URL = "https://api.coingecko.com/api/v3"
-# Fallback to demo endpoint if a demo key is present
 if os.getenv("COINGECKO_API_KEY"):
     COINGECKO_BASE_URL = "https://api.coingecko.com/api/v3" 
-    # For demo keys, CoinGecko often uses: https://api.coingecko.com/api/v3
-    # For paid Pro keys, use: https://pro-api.coingecko.com/api/v3
 
 TARGET_COINS = ["bitcoin", "ethereum", "solana"]
 VS_CURRENCIES = "usd"
 
+
+def is_transient_error(exception):
+    """Filter to determine if the exception warrants a retry attempt."""
+    if isinstance(exception, (ConnectionError, Timeout)):
+        return True
+    if isinstance(exception, HTTPError):
+        status_code = exception.response.status_code
+        # Retry on Rate Limits (429) or standard server errors (5xx)
+        return status_code == 429 or 500 <= status_code < 600
+    return False
+
+
+@retry(
+    stop=stop_after_attempt(5),
+    wait=wait_exponential(multiplier=2, min=4, max=30),
+    retry=is_transient_error,
+    before_sleep=lambda retry_state: logger.warning(
+        f"CoinGecko API call failed (Attempt {retry_state.attempt_number}). "
+        f"Retrying in {retry_state.next_action.sleep:.2f} seconds..."
+    ),
+    reraise=True  # Allows the final exception to bubble up if all 5 attempts fail
+)
 def fetch_crypto_data():
-    """Fetches real-time market data from CoinGecko API."""
+    """Fetches real-time market data from CoinGecko API with exponential backoff."""
     endpoint = f"{COINGECKO_BASE_URL}/simple/price"
     params = {
         "ids": ",".join(TARGET_COINS),
@@ -32,26 +57,17 @@ def fetch_crypto_data():
         "accept": "application/json"
     }
     
-    # Inject API Key if defined in environment variables
     api_key = os.getenv("COINGECKO_API_KEY")
     if api_key:
         headers["x-cg-demo-api-key"] = api_key
 
-    try:
-        response = requests.get(endpoint, params=params, headers=headers, timeout=10)
-        
-        # Handle Rate Limiting (HTTP 429)
-        if response.status_code == 429:
-            print("Warning: Rate limit hit. Sleeping for 60 seconds...", file=sys.stderr)
-            time.sleep(60)
-            return None
-            
-        response.raise_for_status()
-        return response.json()
-        
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching data from CoinGecko: {e}", file=sys.stderr)
-        return None
+    response = requests.get(endpoint, params=params, headers=headers, timeout=10)
+    
+    # This replaces manual status checking; triggers HTTPError for 429s/500s
+    response.raise_for_status()
+    
+    return response.json()
+
 
 def format_pipeline_payload(raw_data):
     """Transforms the raw API layout into a structured ETL record."""
@@ -75,24 +91,18 @@ def format_pipeline_payload(raw_data):
         "data": records
     }
 
+
 def main():
-    print("Starting CoinGecko data ingestion task...")
-    raw_payload = fetch_crypto_data()
-    
-    if not raw_payload:
-        print("Ingestion failed or returned no data.")
-        sys.exit(1)
+    logger.info("Starting CoinGecko data ingestion task...")
+    try:
+        raw_payload = fetch_crypto_data()
+        processed_data = format_pipeline_payload(raw_payload)
+        print(json.dumps(processed_data, indent=2))
         
-    processed_data = format_pipeline_payload(raw_payload)
-    
-    # Print schema payload to stdout for pipeline streaming or log tracking
-    print(json.dumps(processed_data, indent=2))
-    
-    # Optional: Save locally to a landing zone file
-    # output_path = f"data_landing/raw_{int(time.time())}.json"
-    # os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    # with open(output_path, "w") as f:
-    #     json.dump(processed_data, f)
+    except Exception as e:
+        logger.error(f"Ingestion critical failure: {e}", file=sys.stderr)
+        sys.exit(1)
+
 
 if __name__ == "__main__":
     main()
