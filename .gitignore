@@ -1,6 +1,14 @@
-.env
+# Secrets and local configurations
+**/.env
 
-# dbt environments and localized pipeline secrets
-transform/dbt_env/
-transform/crypto_transformer/logs/
-transform/crypto_transformer/target/
+# Local Python virtual environments
+**/*env/
+.venv/
+venv/
+dbt_env/
+
+# Build, tracking, and cache artifacts
+**/__pycache__/
+**/.pytest_cache/
+**/target/
+**/logs/

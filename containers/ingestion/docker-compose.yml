@@ -2,22 +2,42 @@ services:
   db:
     image: postgres:15
     environment:
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: admin
-      POSTGRES_DB: crypto_data
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
     ports:
       - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
 
   ingestion-app:
     build: .
     environment:
       DB_HOST: db
-      DB_USER: admin
-      DB_PASS: admin
-      DB_NAME: crypto_data
+      DB_USER: ${DB_USER}
+      DB_PASS: ${DB_PASSWORD}
+      DB_NAME: ${DB_NAME}
       DLQ_DIR: /app/data/dlq
       PYTHONUNBUFFERED: 1
     volumes:
       - ./data/dlq:/app/data/dlq
     depends_on:
       - db
+
+  dbt-transform:
+    image: ghcr.io/dbt-labs/dbt-postgres:1.5.0  # Matches your Postgres 15 setup
+    environment:
+      DB_HOST: db
+      DB_USER: ${DB_USER}
+      DB_PASS: ${DB_PASSWORD}
+      DB_NAME: ${DB_NAME}
+    volumes:
+      - ./transform:/usr/app/dbt        # Mounts your local dbt project directory
+      - ~/.dbt:/root/.dbt               # Optional: Maps local profiles if preferred
+    profiles:
+      - manual                          # Prevents dbt from running automatically on 'docker compose up'
+    depends_on:
+      - db
+
+volumes:
+  pgdata:                              # Ensures database data persists between downs
