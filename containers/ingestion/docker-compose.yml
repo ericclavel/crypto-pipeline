@@ -25,17 +25,20 @@ services:
       - db
 
   dbt-transform:
-    image: ghcr.io/dbt-labs/dbt-postgres:1.5.0  # Matches your Postgres 15 setup
+    build:
+       context: .
+       dockerfile: Dockerfile.dbt
     environment:
       DB_HOST: db
       DB_USER: ${DB_USER}
       DB_PASS: ${DB_PASSWORD}
       DB_NAME: ${DB_NAME}
     volumes:
-      - ./transform:/usr/app/dbt        # Mounts your local dbt project directory
-      - ~/.dbt:/root/.dbt               # Optional: Maps local profiles if preferred
+      # FIX: Point to the exact subfolder where dbt_project.yml lives
+      - ../../transform/crypto_transformer:/usr/app/dbt_project
+      - ~/.dbt:/root/.dbt
     profiles:
-      - manual                          # Prevents dbt from running automatically on 'docker compose up'
+      - manual
     depends_on:
       - db
 
