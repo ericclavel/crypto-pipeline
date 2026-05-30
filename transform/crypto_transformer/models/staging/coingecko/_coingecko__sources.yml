@@ -1,0 +1,24 @@
+version: 2
+
+sources:
+  - name: coingecko
+    database: crypto_data
+    schema: public
+    description: "Raw cryptocurrency market data ingested via the CoinGecko API script."
+    tables:
+      - name: crypto_prices
+        description: "Raw transactional price points captured by the ingestion loops."
+        columns:
+          - name: id
+            description: "Auto-incrementing primary key."
+            tests:
+              - unique
+              - not_null
+          - name: coin_id
+            description: "The unique string identifier for the coin asset."
+            tests:
+              - not_null
+          - name: price_usd
+            description: "The USD value of the asset with 8-decimal precision."
+            tests:
+              - not_null
