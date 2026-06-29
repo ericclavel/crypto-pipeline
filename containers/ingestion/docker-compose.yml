@@ -26,16 +26,15 @@ services:
 
   dbt-transform:
     build:
-       context: .
-       dockerfile: Dockerfile.dbt
+       context: ../transform
+       dockerfile: Dockerfile
     environment:
       DB_HOST: db
       DB_USER: ${DB_USER}
       DB_PASS: ${DB_PASSWORD}
       DB_NAME: ${DB_NAME}
     volumes:
-      # FIX: Point to the exact subfolder where dbt_project.yml lives
-      - ../../transform/crypto_transformer:/usr/app/dbt_project
+      - ../transform/crypto_transformer:/usr/app/dbt_project
       - ~/.dbt:/root/.dbt
     profiles:
       - manual

@@ -2,10 +2,10 @@ import os
 import time
 import json
 import psycopg2
+from psycopg2.extras import execute_values  # Optimized batch loader
 from datetime import datetime
 from pydantic import ValidationError
 
-# Import your custom data fetcher and Pydantic validation schema
 from ingress_coingecko import fetch_crypto_data 
 from schemas.crypto_model import CryptoPriceData
 
@@ -16,7 +16,6 @@ DB_USER = os.getenv("DB_USER", "admin")
 DB_PASS = os.getenv("DB_PASS", "admin")
 DLQ_DIR = os.getenv("DLQ_DIR", "data/dlq")
 
-# Ensure dead-letter queue folder exists locally
 os.makedirs(DLQ_DIR, exist_ok=True)
 
 def get_db_connection():
@@ -28,7 +27,7 @@ def get_db_connection():
             password=DB_PASS
         )
     except Exception as e:
-        print(f"Database connection failed: {e}")
+        print(f"[CRITICAL] Database connection failed: {e}")
         return None
 
 def init_db():
@@ -36,24 +35,23 @@ def init_db():
     if not conn:
         return
 
-    cur = conn.cursor()
-    create_table_query = """
-    CREATE TABLE IF NOT EXISTS crypto_prices (
-        id SERIAL PRIMARY KEY,
-        coin_id VARCHAR(50) NOT NULL,
-        price_usd DECIMAL(18, 8) NOT NULL,
-        last_updated_at TIMESTAMP NOT NULL,
-        ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-    """
-    cur.execute(create_table_query)
-    conn.commit()
-    cur.close()
+    # Using context managers automatically closes the cursor and commits the transaction
+    with conn:
+        with conn.cursor() as cur:
+            create_table_query = """
+            CREATE TABLE IF NOT EXISTS crypto_prices (
+                id SERIAL PRIMARY KEY,
+                coin_id VARCHAR(50) NOT NULL,
+                price_usd DECIMAL(18, 8) NOT NULL,
+                last_updated_at TIMESTAMP NOT NULL,
+                ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+            cur.execute(create_table_query)
     conn.close()
     print("Database schema initialized.")
 
 def route_to_dlq(coin_id: str, raw_details: any, error_message: str):
-    """Saves unparseable or out-of-bounds metrics to a localized JSON file."""
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
     filename = f"failed_{coin_id}_{timestamp}.json"
     filepath = os.path.join(DLQ_DIR, filename)
@@ -73,10 +71,8 @@ def route_to_dlq(coin_id: str, raw_details: any, error_message: str):
         json.dump(dlq_payload, f, indent=4)
     print(f"[DLQ ALERT] Malformed data for '{coin_id}' logged to {filepath}")
 
-def validate_and_transform(payload: dict) -> list[dict]:
-    """Validates the CoinGecko nested map using Pydantic.
-    Drops bad assets out of the transaction pool and writes them to the DLQ.
-    """
+def validate_and_transform(payload: dict) -> list[tuple]:
+    """Validates data via Pydantic and outputs clean tuples ready for psycopg2 execute_values."""
     if not payload or not isinstance(payload, dict):
         print("Empty or invalid root payload shape. Skipping processing block.")
         return []
@@ -89,13 +85,18 @@ def validate_and_transform(payload: dict) -> list[dict]:
             continue
 
         try:
-            # Re-map nested coin keys dynamically into the flat schema structure
             validated_record = CryptoPriceData(
                 asset_id=coin_id,
                 price_usd=details.get("usd"),
                 last_updated=details.get("last_updated_at")
             )
-            clean_records.append(validated_record.model_dump())
+            
+            # Map directly to a tuple alignment matching the DB column structure
+            clean_records.append((
+                validated_record.asset_id,
+                validated_record.price_usd,
+                validated_record.last_updated
+            ))
 
         except ValidationError as e:
             route_to_dlq(coin_id, details, e.errors())
@@ -104,8 +105,8 @@ def validate_and_transform(payload: dict) -> list[dict]:
 
     return clean_records
 
-def insert_data(validated_records: list[dict]):
-    """Loads strictly validated records directly into PostgreSQL."""
+def insert_data(validated_records: list[tuple]):
+    """Loads records atomically into PostgreSQL via optimized multi-row execution."""
     if not validated_records:
         return
 
@@ -113,26 +114,22 @@ def insert_data(validated_records: list[dict]):
     if not conn:
         return
         
-    cur = conn.cursor()
     insert_query = """
     INSERT INTO crypto_prices (coin_id, price_usd, last_updated_at)
-    VALUES (%s, %s, %s);
+    VALUES %s;
     """
     
-    for record in validated_records:
-        try:
-            cur.execute(insert_query, (
-                record["asset_id"], 
-                record["price_usd"], 
-                record["last_updated"]
-            ))
-            print(f"Successfully Inserted: {record['asset_id']} at ${record['price_usd']}")
-        except Exception as e:
-            print(f"Database write execution dropped for {record['asset_id']}: {e}")
-
-    conn.commit()
-    cur.close()
-    conn.close()
+    try:
+        # The 'with conn' block manages the transaction. 
+        # If an error happens inside, it auto-rolls back the entire batch.
+        with conn:
+            with conn.cursor() as cur:
+                execute_values(cur, insert_query, validated_records)
+        print(f"Successfully committed batch of {len(validated_records)} records to database.")
+    except Exception as e:
+        print(f"[BATCH ERROR] Transaction rolled back. Insert failed for entire batch: {e}")
+    finally:
+        conn.close()
 
 def main():
     print("Starting ingestion engine...")
@@ -140,19 +137,18 @@ def main():
     
     while True:
         print("Fetching data from CoinGecko script...")
-        raw_data = fetch_crypto_data()
-        
-        if raw_data:
-            # Transform and Validate Stage
-            valid_batch = validate_and_transform(raw_data)
-            
-            # Load Stage
-            if valid_batch:
-                insert_data(valid_batch)
+        try:
+            raw_data = fetch_crypto_data()
+            if raw_data:
+                valid_batch = validate_and_transform(raw_data)
+                if valid_batch:
+                    insert_data(valid_batch)
+                else:
+                    print("Batch contains zero valid entries to commit to database.")
             else:
-                print("Batch contains zero valid entries to commit to database.")
-        else:
-            print("No data received from fetch function.")
+                print("No data received from fetch function.")
+        except Exception as e:
+            print(f"[PIPELINE RUNTIME ERROR] Anomaly caught in execution loop: {e}")
             
         print("Waiting 60 seconds for next poll...")
         time.sleep(60)
